@@ -1,0 +1,15 @@
+name: Windows tests
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/Test-Core.ps1
+      - name: PowerShell 7
+        shell: pwsh
+        run: ./tests/Test-Core.ps1

@@ -1,0 +1,8 @@
+*.log
+*.dpapi
+*.reg
+status.json
+original-metrics.json
+private-backups/
+.idea/
+.vscode/
