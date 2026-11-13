@@ -1,5 +1,5 @@
 $ErrorActionPreference='Stop'
-$entry=Join-Path $PSScriptRoot '..\EthernetFirst.ps1'
+$sourceEntry=Join-Path $PSScriptRoot '..\EthernetFirst.ps1'
 $script:writes=0
 function Get-NetAdapter { [pscustomobject]@{InterfaceGuid='virtual';ifIndex=55;Name='VPN';InterfaceDescription='VPN';HardwareInterface=$false;MediaType='IP';PhysicalMediaType='IP';Status='Up';LinkSpeed='1 Gbps'} }
 function Get-NetConnectionProfile { }
@@ -10,14 +10,25 @@ function Get-DnsClientServerAddress { }
 function Set-NetIPInterface { $script:writes++; throw 'Monitor attempted to mutate network' }
 $tmp=Join-Path ([IO.Path]::GetTempPath()) ('ef-entry-'+[Guid]::NewGuid())
 try {
+    # Test an otherwise identical isolated copy, never compete with the user's
+    # active production mutex. All OS network boundaries below are mocked.
+    [void][IO.Directory]::CreateDirectory($tmp)
+    $entry=Join-Path $tmp 'EthernetFirst.ps1'
+    $content=[IO.File]::ReadAllText($sourceEntry).Replace('Global\EthernetFirst-NetworkControl',('Local\EF-Test-'+[Guid]::NewGuid()))
+    [IO.File]::WriteAllText($entry,$content,[Text.UTF8Encoding]::new($true))
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\src') -Destination (Join-Path $tmp 'src') -Recurse
+    $defaults=@{autoReturnToWired=$true;managedAdapterGuids=@()}
+    $defaults | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $tmp 'preferences.json') -Encoding UTF8
     $null=& $entry -Once -NoNotifications -StateDirectory $tmp
     $status=Get-Content (Join-Path $tmp 'status.json') -Raw | ConvertFrom-Json
     if (-not $status.PSObject.Properties['mode'] -or $status.mode -ne 'Monitor' -or $script:writes -ne 0) { throw 'Default entry must publish monitor mode and never change network settings' }
     if ($status.probeType -ne 'HTTPS') { throw 'Entry must publish actual HTTPS probe type' }
+    if (-not $status.PSObject.Properties['autoReturnToWired'] -or -not $status.autoReturnToWired) { throw 'Entry must load the saved recovery preference without enabling Auto' }
+    if (-not $status.PSObject.Properties['adapters'] -or -not $status.PSObject.Properties['probeProfiles']) { throw 'Status must include adapter inventory and both probe profiles' }
     $failed=$false
     try { & $entry -Once -Apply -Restore -NoNotifications -StateDirectory $tmp } catch { $failed=$true }
     if (-not $failed) { throw 'Conflicting mutation commands must be rejected' }
-    $assertions=3
+    $assertions=5
     $admin=([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if ($admin) {
         # An empty isolated recovery state causes no OS changes. Probe/config

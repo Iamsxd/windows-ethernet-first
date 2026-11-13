@@ -1,8 +1,13 @@
 {
   "adapterOverrides": {},
   "managedAdapterGuids": [],
-  "httpsEndpoints": [
+  "autoReturnToWired": false,
+  "domesticHttpsEndpoints": [
+    "https://connectivitycheck.platform.hicloud.com/generate_204",
+    "https://wifi.vivo.com.cn/generate_204"
+  ],
+  "foreignHttpsEndpoints": [
     "https://www.gstatic.com/generate_204",
-    "https://cp.cloudflare.com/generate_204"
+    "https://www.google.com/generate_204"
   ]
 }

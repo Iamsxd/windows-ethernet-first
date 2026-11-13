@@ -13,6 +13,15 @@ using System.Threading.Tasks;
 
 namespace EthernetFirst {
     public static class Probe {
+        // Two profiles share the per-link wall-clock window, without serially
+        // doubling timeouts or mixing either profile's outcome into the other.
+        public static int[] CheckProfiles(int index, string source, string[] dnsServers,
+            string[] domesticEndpoints, string[] foreignEndpoints, int timeoutMs) {
+            var domestic=Task.Run(() => CheckHttps(index, source, dnsServers, domesticEndpoints, timeoutMs));
+            var foreign=Task.Run(() => CheckHttps(index, source, dnsServers, foreignEndpoints, timeoutMs));
+            Task.WaitAll(domestic, foreign);
+            return new int[] { domestic.Result, foreign.Result };
+        }
         // All DNS, connect, TLS and HTTP operations in a round share this deadline.
         private sealed class Budget : IDisposable {
             readonly Stopwatch watch = Stopwatch.StartNew();

@@ -1,45 +1,48 @@
-# Ethernet First — manual switching and optional HTTPS failover
+# Ethernet First — dual-link reachability dashboard
 
 [中文说明](README.zh-CN.md) · [Upstream](https://github.com/w1zardz/windows-ethernet-first)
 
-This MIT-licensed fork retains the upstream PowerShell/C# implementation for Windows 10/11. No Python, driver or external PowerShell module is needed.
+MIT-licensed Windows 10/11 fork using PowerShell, C# and native WPF. No Python, additional drivers or external PowerShell modules.
 
 ## Start
 
-Extract the complete repository and run **start.bat**. Accept Windows UAC authorization; the tray starts in **monitor-only mode**. This portable launcher uses Chinese labels. For English, run `EthernetFirst.ps1 -Language en` from an administrator PowerShell.
+Extract the complete repository and run **start.bat**. Accept Windows UAC; the dashboard starts in **monitor-only mode**. It displays domestic and foreign reachability independently for Ethernet and Wi-Fi, manual controls, automatic settings and recent events. Close hides to the tray; double-click the tray to reopen. The dashboard uses Chinese labels; `-Language en` selects English tray/CLI labels. PowerShell 7 GUI launches require `-STA`.
 
-Right-click the tray to prefer Ethernet, prefer Wi-Fi, toggle automatic failover, check now, view status, restore original metrics, or exit. Manual selection disables auto. Exit leaves current metrics in place; use Restore first to undo them. Each new process starts with auto off unless explicitly passed `-Apply`.
+Manual preference disables auto. Exit leaves current metrics in place; use Restore first to undo them. Every new process starts with auto off unless explicitly passed `-Apply`.
 
-Optional **install.bat** installs a protected, elevated task at the current user's sign-in; it also starts monitor-only. Portable state lives in `%LOCALAPPDATA%\EthernetFirst`; installed state lives in `%PROGRAMDATA%\EthernetFirst`. Use the same state directory to restore. Exit any portable tray before installing or uninstalling. **uninstall.bat** stops the installed task and restores its original metrics.
+Optional **install.bat** installs a protected elevated task at sign-in, starting monitor-only and tray-only. Portable state lives in `%LOCALAPPDATA%\EthernetFirst`; installed state in `%PROGRAMDATA%\EthernetFirst`. Use the same state directory for recovery. Exit the portable tray before installing/uninstalling. **uninstall.bat** stops the installed task and restores its saved metrics.
 
 ## Health and safety
 
-- Probe Google and Cloudflare HTTPS 204 endpoints, binding both source and outgoing interface. DNS uses that interface's same-family servers. TLS validates trust and hostname. No HTTP proxy or system DNS fallback is used.
-- One healthy endpoint is sufficient. Automatic failover requires three failed current rounds and two successful alternate rounds in every active protocol. A 180-second cooldown prevents oscillation; no automatic failback.
-- Only one real wired adapter and one real Wi-Fi adapter are managed. Ambiguous selections, split IPv4/IPv6 defaults, unknown local policy failures, and controlling unmanaged/VPN defaults refuse unsafe changes. Missing same-family DNS is unknown.
+- Two independent HTTPS 204 profiles: domestic defaults are Huawei/vivo; foreign defaults are gstatic/Google. Each succeeds when either endpoint succeeds. Profiles run concurrently for each link, with separate streaks. DNS uses interface-bound same-family servers; TLS validates trust and hostname. No HTTP proxy or system DNS fallback.
+- Automatic failover uses **domestic health**: three failed current rounds and two successful alternate rounds in every active protocol. Foreign-only failure leaves the current connection in place. A 180-second cooldown prevents oscillation.
+- An independent **return to Ethernet** preference defaults off. With auto enabled, it requires two successful domestic AND foreign rounds on Ethernet in every active family and the normal cooldown before returning from Wi-Fi.
+- Only selected physical Ethernet/Wi-Fi adapters are managed. Ambiguous selections, split defaults, unknown local failures and controlling unmanaged/VPN defaults prevent automatic changes. Missing same-family DNS is unknown.
 - Save the first baseline by GUID, resolve indexes again before writes, verify actual default-route winners and roll back partial failures. External metric changes pause control. Restore asks before overwriting external changes.
-- Keep both adapters connected. Do not change IP, gateway, DNS, system proxy, VPN or router configuration. Existing sockets, application-bound traffic and more-specific VPN routes may keep using another connection.
+- Both adapters stay connected. No IP, gateway, DNS, system proxy, VPN or router changes. Existing sockets, bound applications and specific VPN routes may retain another connection.
 
-When wired and Wi-Fi share the same router/upstream, switching can bypass a broken local link but cannot fix that common upstream. A successful health endpoint does not guarantee every website works. Each round starts 15 seconds after the previous one finishes; no overlapping probe rounds.
+Health refers only to configured test sites, not every domestic/foreign website. Switching cannot fix a router/upstream shared by both links. Rounds start 15 seconds after the previous one finishes, without overlap.
 
 ## Configuration and CLI
 
-`config.json` accepts `adapterOverrides`, `managedAdapterGuids` and exactly two `httpsEndpoints` on distinct hosts returning HTTP 204. The default empty GUID list requires exactly one wired and one Wi-Fi candidate. To select explicitly, get GUIDs with `Get-NetAdapter | Select Name,InterfaceGuid`, add the two GUIDs and restart. Overrides cannot turn virtual hardware into physical hardware. Legacy TCP `probeIPv4` / `probeIPv6` lists are no longer used for health.
+Select an Ethernet/Wi-Fi pair in the dashboard and save, or choose automatic for both (requires unique physical candidates). Restore outstanding metric changes before changing the managed pair. The state directory's `preferences.json` remembers adapter selection and return preference, overriding corresponding `config.json` defaults; it never persists active Auto mode.
+
+`config.json` accepts `adapterOverrides`, `managedAdapterGuids`, `autoReturnToWired`, `domesticHttpsEndpoints` and `foreignHttpsEndpoints`. Each profile requires exactly two HTTPS 204 URLs on distinct hosts. Legacy `httpsEndpoints` is a foreign-profile alias; explicit `foreignHttpsEndpoints` takes precedence. Overrides cannot turn virtual hardware into physical hardware. Legacy TCP probe lists no longer determine health.
 
 ```powershell
-# Read-only, JSON output
+# Read-only JSON
 powershell -NoProfile -ExecutionPolicy Bypass -File .\EthernetFirst.ps1 -Once
 
 # Administrator shell; close existing tray first
-powershell -NoProfile -ExecutionPolicy Bypass -File .\EthernetFirst.ps1 -Once -Prefer WiFi
-powershell -NoProfile -ExecutionPolicy Bypass -File .\EthernetFirst.ps1 -Apply
+powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\EthernetFirst.ps1 -Once -Prefer WiFi
+powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\EthernetFirst.ps1 -Apply
 powershell -NoProfile -ExecutionPolicy Bypass -File .\EthernetFirst.ps1 -Restore
 ```
 
-`-ForceRestore` with `-Restore` explicitly permits overwriting external metric changes. Reconnect missing adapters and retry incomplete restoration; their backup remains. Never delete the backup to dismiss a recovery error.
+`-TrayOnly` hides the dashboard at startup; `-NoNotifications` omits the GUI. `-Restore -ForceRestore` explicitly permits overwriting external metric changes. Reconnect missing adapters and retry incomplete recovery; never delete the backup to dismiss an error.
 
 ## Validation and privacy
 
-Run `tests/Run-All.ps1` under Windows PowerShell 5.1 and PowerShell 7. Deterministic policy/transaction/controller/snapshot/entry tests mock Windows network calls. Socket tests use temporary local DNS/TLS peers and do not change real adapters or certificate stores.
+Run `tests/Run-All.ps1` with `-STA` under Windows PowerShell 5.1 and PowerShell 7. Policy/transaction/controller/snapshot/entry tests mock Windows network calls. Socket tests use local DNS/TLS peers without adapter or certificate-store changes. WPF tests exercise actual controls, command queues, hide/reopen and scrolling.
 
-Only fixed DNS/HTTPS health requests are sent. Logs and state remain local, contain adapter names/GUIDs, and should not be committed. Platform TLS chain validation may independently retrieve certificate metadata; target-host DNS and HTTPS connections remain interface-bound. No analytics or browsing history collection.
+Only fixed DNS/HTTPS health requests are sent. Local status, events, preferences and backups contain adapter names, addresses/GUIDs and must not be committed. Platform TLS validation may independently retrieve certificate metadata. No browsing history collection or analytics.

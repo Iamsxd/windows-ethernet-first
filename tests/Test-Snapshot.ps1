@@ -6,7 +6,7 @@ function Assert($Condition,[string]$Message) {
 }
 $vpn=[pscustomobject]@{InterfaceGuid='vpn'; InterfaceDescription='VPN'; HardwareInterface=$false; MediaType='802.3'; PhysicalMediaType='802.3'}
 Assert ((Get-AdapterKind $vpn '' @{vpn='Wired'}) -eq 'Virtual') 'A config override must never turn virtual hardware into a managed physical adapter'
-$script:wirePresent=$true; $script:source='192.0.2.7'; $script:probe=1; $script:osFailure=$false
+$script:wirePresent=$true; $script:source='192.0.2.7'; $script:probe=1; $script:foreignProbe=$null; $script:osFailure=$false
 function Get-NetAdapter {
     if ($script:osFailure) { throw 'OS snapshot failed' }
     if ($script:wirePresent) { [pscustomobject]@{InterfaceGuid='wired';ifIndex=11;Name='Ethernet';InterfaceDescription='Ethernet';HardwareInterface=$true;MediaType='802.3';PhysicalMediaType='802.3';Status='Up';LinkSpeed='1 Gbps'} }
@@ -25,9 +25,10 @@ function Get-DnsClientServerAddress { [pscustomobject]@{InterfaceIndex=11;Server
 function Get-NetAdapterStatistics { [pscustomobject]@{ReceivedBytes=100;SentBytes=200} }
 $script:calls=@()
 function Invoke-LinkProbe {
-    param($Index,$Source,$DnsServers,$Endpoints,$TimeoutMs)
-    $script:calls+=,[pscustomobject]@{Index=$Index;Source=$Source;Dns=@($DnsServers);Endpoints=@($Endpoints)}
-    return $script:probe
+    param($Index,$Source,$DnsServers,$DomesticEndpoints,$ForeignEndpoints,$TimeoutMs)
+    $script:calls+=,[pscustomobject]@{Index=$Index;Source=$Source;Dns=@($DnsServers);Endpoints=@($ForeignEndpoints);Domestic=@($DomesticEndpoints)}
+    $foreign=if ($null -eq $script:foreignProbe) {$script:probe} else {$script:foreignProbe}
+    return @($script:probe,$foreign)
 }
 $h=@{}
 $s=Get-NetworkSnapshot $h
@@ -40,6 +41,13 @@ Assert ($null -eq $wired.Healthy -and $wired.Good -eq 1 -and $wired.Bad -eq 0) '
 Assert (@($s.Links | Where-Object Kind -eq 'Virtual').Count -eq 1) 'Virtual defaults must be visible to safe switching policy'
 $s=Get-NetworkSnapshot $h
 Assert (($s.Links | Where-Object Guid -eq 'wired').Good -eq 2) 'Snapshot must expose consecutive success counts'
+$script:foreignProbe=0
+for ($round=0; $round -lt 3; $round++) { $s=Get-NetworkSnapshot $h }
+$row=@($s.Links | Where-Object Guid -eq 'wired')[0]
+Assert ($row.DomesticGood -ge 2 -and $row.ForeignBad -eq 3 -and $row.Bad -eq 0) 'A foreign-only outage must preserve domestic health and its separate streak'
+Assert ($script:calls[0].Domestic.Count -eq 2) 'Domestic reachability must use its own endpoint group'
+Assert (@($s.Adapters | Where-Object Guid -eq 'wired').Count -eq 1) 'The dashboard must receive physical adapter inventory'
+$script:foreignProbe=$null
 $script:probe=0
 $null=Get-NetworkSnapshot $h; $null=Get-NetworkSnapshot $h
 $script:wirePresent=$false; $null=Get-NetworkSnapshot $h
@@ -52,7 +60,7 @@ $script:osFailure=$true
 try { $null=Get-NetworkSnapshot $h } catch { }
 Assert ($h.Count -eq 0) 'A failed overall snapshot must invalidate all consecutive evidence'
 $script:osFailure=$false
-function Invoke-LinkProbe { return -1 }
+function Invoke-LinkProbe { return @(-1,-1) }
 $s=Get-NetworkSnapshot $h
 $wired=@($s.Links | Where-Object Guid -eq 'wired')[0]
 Assert ($null -eq $wired.Healthy -and $wired.Good -eq 0 -and $wired.Bad -eq 0 -and $wired.ProbeBlocked) 'Unknown probes must reset streaks and never count as failed rounds'

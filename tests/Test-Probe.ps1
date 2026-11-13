@@ -247,4 +247,9 @@ Assert ($invalidDnsBindingResult -eq -1) 'Local UDP DNS binding failure is unkno
 Assert ($forwardRejected) 'Reject QNAME and RR owner forward pointers into undeclared trailing data'
 Assert ($trailingRejected) 'Reject bytes not consumed by the declared DNS sections'
 Assert ($opaqueRejected) 'Compression pointers must target a previously parsed domain-name label boundary'
+Assert ($null -ne $probe.GetMethod('CheckProfiles')) 'Domestic and foreign profiles must have independent bounded probe results'
+$profiles=[EthernetFirst.Probe]::CheckProfiles($loopback.InterfaceIndex,'127.0.0.1',[string[]]@(),[string[]]@(),[string[]]@('https://health.test'),100)
+Assert ($profiles.Length -eq 2 -and $profiles[0] -eq 0 -and $profiles[1] -eq -1) 'One profile failing must not overwrite the other profile unknown result'
+$profiles=[EthernetFirst.Probe]::CheckProfiles(2000001,'127.0.0.1',[string[]]@(),[string[]]@('https://127.0.0.1/'),[string[]]@('https://127.0.0.1/'),100)
+Assert ($profiles[0] -eq -1 -and $profiles[1] -eq -1) 'Local interface failure must remain unknown in both profiles'
 Write-Output "PASS $script:count probe tests (DNS, HTTP, strict TLS, bounded time; no adapter changes)"

@@ -7,6 +7,7 @@ param(
     [switch]$Restore,
     [switch]$ForceRestore,
     [switch]$NoNotifications,
+    [switch]$TrayOnly,
     [ValidateSet('auto','zh','ru','en')][string]$Language = 'auto',
     [ValidateRange(5,300)][int]$IntervalSeconds = 15,
     [string]$StateDirectory = (Join-Path $env:LOCALAPPDATA 'EthernetFirst'),
@@ -26,9 +27,10 @@ if (($Apply -or $Prefer -or $Restore) -and -not $admin) { throw 'Network changes
 New-Item -ItemType Directory -Path $StateDirectory -Force | Out-Null
 $backupPath = Join-Path $StateDirectory 'original-metrics.json'
 $expectedPath = Join-Path $StateDirectory 'managed-metrics.json'
+$preferencesPath = Join-Path $StateDirectory 'preferences.json'
 # All entry points, including restore, share the same writer lock.
 $mutex = [Threading.Mutex]::new($false, 'Global\EthernetFirst-NetworkControl')
-$ownsMutex = $false; $tray = $null; $worker = $null
+$ownsMutex = $false; $tray = $null; $worker = $null; $dashboard=$null
 $state = New-ControllerState
 $requests = New-Object 'System.Collections.Generic.Queue[string]'
 $lastSnapshot = $null; $lastError = ''; $lastEvent = ''; $nextCheck = [DateTime]::MinValue
@@ -38,19 +40,18 @@ function Show-Notice([string]$Message) {
 }
 
 function Show-LinkStatus {
-    $lines = @($(if ($zh) { '自动切换：' + $(if ($state.Mode -eq 'Auto') {'开启'} else {'关闭'}) } else { 'Automatic failover: ' + $state.Mode }))
-    if ($lastError) { $lines += $lastError }
-    if ($lastSnapshot) {
-        foreach ($link in $lastSnapshot.Links) {
-            $result = if ($link.Good -ge 2) { if ($zh) {'HTTPS 可用'} else {'HTTPS healthy'} }
-                elseif ($link.Bad -ge 3) { if ($zh) {'HTTPS 失败'} else {'HTTPS failed'} }
-                elseif ($link.ProbeBlocked) { if ($zh) {'未验证 / 未知'} else {'Unverified / unknown'} }
-                else { if ($zh) {'正在确认'} else {'Confirming'} }
-            $lines += ('{0} / {1}: {2}' -f $link.Name,$link.Family,$result)
-        }
+    if ($dashboard) {
+        $dashboard.Window.Show()
+        if ($dashboard.Window.WindowState -eq 'Minimized') { $dashboard.Window.WindowState='Normal' }
+        [void]$dashboard.Window.Activate()
     }
-    $lines += $state.LastReason
-    [void][Windows.Forms.MessageBox]::Show(($lines -join "`r`n"),'Ethernet First')
+}
+
+function Update-ControllerView([bool]$Busy=$false) {
+    if ($dashboard) {
+        $model=Get-DashboardModel $lastSnapshot $state $settings.ManagedGuids $lastError
+        Update-NetworkDashboard $dashboard $model $state $Busy $admin (Test-Path -LiteralPath $backupPath)
+    }
 }
 
 function Invoke-TrayRequests {
@@ -59,6 +60,7 @@ function Invoke-TrayRequests {
     if ($state.RestoreRequested) { return }
     while ($requests.Count) {
         $request = $requests.Dequeue()
+        $actionError=''
         try {
             switch ($request) {
                 'Exit' { $state.Exit=$true; $state.Mode='Monitor' }
@@ -67,6 +69,30 @@ function Invoke-TrayRequests {
                 'AutoToggle' {
                     $mode = if ($state.Mode -eq 'Auto') {'Monitor'} else {'Auto'}
                     Request-SwitchMode $state $mode $admin
+                    $script:nextCheck=[DateTime]::MinValue
+                }
+                {$_ -in @('AutoOn','AutoOff')} {
+                    $mode=if ($request -eq 'AutoOn') {'Auto'} else {'Monitor'}
+                    Request-SwitchMode $state $mode $admin
+                    $script:nextCheck=[DateTime]::MinValue
+                }
+                {$_ -in @('RecoveryOn','RecoveryOff')} {
+                    if (-not $admin) { throw 'Administrator authorization is required to save settings.' }
+                    $enabled=($request -eq 'RecoveryOn')
+                    Write-UserPreferences $preferencesPath $settings.ManagedGuids $enabled
+                    Request-WiredRecovery $state $enabled
+                    $script:nextCheck=[DateTime]::MinValue
+                }
+                'SelectAdapters' {
+                    if (-not $admin) { throw 'Administrator authorization is required to save settings.' }
+                    $selected=@(Get-DashboardSelection $dashboard)
+                    $old=(@($settings.ManagedGuids | Sort-Object) -join ',')
+                    $new=(@($selected | Sort-Object) -join ',')
+                    if ($old -ne $new -and (Test-Path -LiteralPath $backupPath)) { throw '请先恢复原设置，再更换管理的网卡。' }
+                    Write-UserPreferences $preferencesPath $selected $state.ReturnToWired
+                    $settings.ManagedGuids=$selected; $dashboard.SelectionDirty=$false
+                    Request-SwitchMode $state Monitor $admin
+                    Request-ConnectionCheck $state
                     $script:nextCheck=[DateTime]::MinValue
                 }
                 'Restore' {
@@ -79,7 +105,19 @@ function Invoke-TrayRequests {
                     $script:nextCheck=[DateTime]::MinValue
                 }
             }
-        } catch { $state.Mode='Monitor'; $script:lastError=$_.Exception.Message; Show-Notice $script:lastError }
+        } catch { $state.Mode='Monitor'; $script:lastError=$_.Exception.Message; $actionError=$script:lastError; Show-Notice $script:lastError }
+        if ($dashboard) {
+            $message=if ($actionError) {'操作未完成：'+$actionError} else { switch ($request) {
+                'Check' {'已请求重新检测两条线路。'}
+                'Wired' {'已请求优先使用有线；自动模式已关闭。'}
+                'WiFi' {'已请求优先使用 Wi-Fi；自动模式已关闭。'}
+                {$_ -in @('AutoToggle','AutoOn','AutoOff')} {if ($state.Mode -eq 'Auto') {'自动守护已开启。'} else {'自动守护已关闭，保留当前优先级。'}}
+                {$_ -in @('RecoveryOn','RecoveryOff')} {if ($state.ReturnToWired) {'已开启有线恢复后自动切回。'} else {'已关闭有线恢复后自动切回。'}}
+                'SelectAdapters' {'网卡选择已处理，当前为只检测模式。'}
+                default {''}
+            } }
+            if ($message) { Add-DashboardEvent $dashboard $message }
+        }
         if ($tray) { $autoItem.Checked=($state.Mode -eq 'Auto') }
     }
 }
@@ -108,12 +146,20 @@ try {
     }
     # Restoration does not depend on health endpoint configuration or Probe.cs.
     $settings=Read-SwitchConfiguration $ConfigPath
+    $preferences=Read-UserPreferences $preferencesPath $settings
+    $settings.ManagedGuids=@($preferences.ManagedGuids)
+    $state.ReturnToWired=$preferences.ReturnToWired
     if (-not ('EthernetFirst.Probe' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'src\Probe.cs') }
     if ($Apply) { Request-SwitchMode $state Auto $admin }
     if ($Prefer) { Request-SwitchMode $state $Prefer $admin }
     if (-not $NoNotifications -and -not $Once) {
         Add-Type -AssemblyName System.Windows.Forms
         Add-Type -AssemblyName System.Drawing
+        . (Join-Path $PSScriptRoot 'src\DashboardModel.ps1')
+        . (Join-Path $PSScriptRoot 'src\Dashboard.ps1')
+        $dashboard=New-NetworkDashboard $requests
+        Update-ControllerView $true
+        if (-not $TrayOnly) { $dashboard.Window.Show() }
         $tray = New-Object Windows.Forms.NotifyIcon
         $tray.Icon=[Drawing.SystemIcons]::Information
         $tray.Text='Ethernet First'; $tray.Visible=$true
@@ -127,7 +173,7 @@ try {
         [void]$menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
         $checkItem=$menu.Items.Add($(if ($zh) {'立即检测两条线路'} else {'Check connections now'}))
         $checkItem.Add_Click({$requests.Enqueue('Check')})
-        $detailsItem=$menu.Items.Add($(if ($zh) {'查看线路状态'} else {'View connection status'}))
+        $detailsItem=$menu.Items.Add($(if ($zh) {'打开主窗口'} else {'Open dashboard'}))
         $detailsItem.Add_Click({$requests.Enqueue('Details')})
         $restoreItem=$menu.Items.Add($(if ($zh) {'恢复工具修改前的设置'} else {'Restore original settings'}))
         $restoreItem.Add_Click({$requests.Enqueue('Restore')})
@@ -138,7 +184,7 @@ try {
     }
     $health=@{}
     do {
-        if ($tray) { [Windows.Forms.Application]::DoEvents(); Invoke-TrayRequests }
+        if ($tray) { [Windows.Forms.Application]::DoEvents(); Invoke-TrayRequests; Update-ControllerView }
         if ($state.Exit) { break }
         if ($state.RestoreRequested) {
             try { Invoke-PendingRestore }
@@ -158,13 +204,13 @@ try {
             [void]$worker.AddScript({param($root,$memory,$overrides,$targets)
                 . (Join-Path $root 'src\Core.ps1')
                 Get-NetworkSnapshot $memory $overrides $targets
-            }).AddArgument($PSScriptRoot).AddArgument($health).AddArgument($settings.Overrides).AddArgument(@{Https=$settings.Https})
+            }).AddArgument($PSScriptRoot).AddArgument($health).AddArgument($settings.Overrides).AddArgument(@{Domestic=$settings.DomesticHttps;Foreign=$settings.ForeignHttps})
             # -Once executes in the current scope, allowing deterministic OS-boundary tests.
-            if ($Once) { $snapshot=Get-NetworkSnapshot $health $settings.Overrides @{Https=$settings.Https} }
+            if ($Once) { $snapshot=Get-NetworkSnapshot $health $settings.Overrides @{Domestic=$settings.DomesticHttps;Foreign=$settings.ForeignHttps} }
             else {
                 $pending=$worker.BeginInvoke()
                 while (-not $pending.IsCompleted -and -not $state.Exit) {
-                    if ($tray) { [Windows.Forms.Application]::DoEvents(); Invoke-TrayRequests }
+                    if ($tray) { [Windows.Forms.Application]::DoEvents(); Invoke-TrayRequests; Update-ControllerView $true }
                     Start-Sleep -Milliseconds 100
                 }
                 if ($state.Exit) { $worker.Stop(); break }
@@ -194,7 +240,7 @@ try {
                     $winners+=@($links | Where-Object TotalMetric -eq $minimum | Select-Object Guid,Name,Kind,Family,TotalMetric)
                 }
             }
-            $status=[ordered]@{checkedAt=[DateTime]::UtcNow.ToString('o'); mode=$state.Mode; applying=($state.Mode -eq 'Auto'); probeType='HTTPS'; message=$state.LastReason; physicalDefaults=@($winners | Where-Object Kind -ne Virtual); defaultRoutes=$winners; links=$snapshot.Links}
+            $status=[ordered]@{checkedAt=$snapshot.CheckedAt; mode=$state.Mode; applying=($state.Mode -eq 'Auto'); autoReturnToWired=$state.ReturnToWired; probeType='HTTPS'; probeProfiles=@('Domestic','Foreign'); message=$state.LastReason; physicalDefaults=@($winners | Where-Object Kind -ne Virtual); defaultRoutes=$winners; links=$snapshot.Links; adapters=$snapshot.Adapters}
             Write-AtomicJson (Join-Path $StateDirectory 'status.json') $status
             if ($state.LastReason -ne $lastEvent) {
                 $line='{0} {1}' -f (Get-Date -Format o),$state.LastReason
@@ -205,6 +251,7 @@ try {
                 $lastEvent=$state.LastReason
             }
             if ($tray) { $autoItem.Checked=($state.Mode -eq 'Auto') }
+            Update-ControllerView
             if ($Once) { $status | ConvertTo-Json -Depth 8 }
         } catch {
             $state.Mode='Monitor'; $lastError=$_.Exception.Message
@@ -214,11 +261,13 @@ try {
         } finally {
             if ($worker) { $worker.Dispose(); $worker=$null }
             if ($tray) { $autoItem.Checked=($state.Mode -eq 'Auto') }
+            Update-ControllerView
         }
         $nextCheck=if ($state.CheckRequested) {[DateTime]::MinValue} else {[DateTime]::UtcNow.AddSeconds($IntervalSeconds)}
     } while (-not $Once)
 } finally {
     if ($worker) { $worker.Dispose() }
+    if ($dashboard) { $dashboard.AllowClose=$true; $dashboard.Window.Close() }
     if ($tray) { $tray.Dispose(); $menu.Dispose() }
     if ($ownsMutex) { $mutex.ReleaseMutex() }
     $mutex.Dispose()

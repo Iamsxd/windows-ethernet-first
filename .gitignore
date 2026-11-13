@@ -1,4 +1,6 @@
 *.log
+preferences.json
+preferences.json*.tmp
 *.dpapi
 *.reg
 status.json

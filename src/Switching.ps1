@@ -4,7 +4,8 @@ function Get-SwitchDecision {
     [CmdletBinding()]
     param([object[]]$Links = @(), [ValidateSet('Monitor','Auto','Wired','WiFi')][string]$Mode = 'Monitor',
         [string[]]$ManagedGuids = @(), [datetime]$LastSwitch = [datetime]::MinValue,
-        [datetime]$Now = [datetime]::UtcNow, [ValidateRange(0,86400)][int]$CooldownSeconds = 180)
+        [datetime]$Now = [datetime]::UtcNow, [ValidateRange(0,86400)][int]$CooldownSeconds = 180,
+        [switch]$ReturnToWired)
 
     $result = [pscustomobject]@{ Plan=@(); Reason=''; TargetGuid='' }
     if ($Mode -eq 'Monitor') { $result.Reason='Monitor mode; no settings changed.'; return $result }
@@ -56,6 +57,8 @@ function Get-SwitchDecision {
         }
         $currentGuid = $currentGuids[0]
         $targetGuid = @($selected | Where-Object { $_ -ne $currentGuid })[0]
+        $failoverReady=$true
+        $recoveryReady=($ReturnToWired -and $currentGuid -eq $wifi[0] -and $targetGuid -eq $wired[0])
         foreach ($family in $families) {
             $active = @($managed | Where-Object { $_.Guid -eq $currentGuid -and $_.Family -eq $family })
             $backup = @($managed | Where-Object { $_.Guid -eq $targetGuid -and $_.Family -eq $family })
@@ -63,8 +66,13 @@ function Get-SwitchDecision {
                 $result.Reason='The backup lacks an active protocol/address/default route; no automatic switch.'; return $result
             }
             if ([int]$active[0].Bad -lt 3 -or [int]$backup[0].Good -lt 2) {
-                $result.Reason='Waiting for three failed current rounds and two good backup rounds in every active protocol.'; return $result
+                $failoverReady=$false
             }
+            if ([int]$backup[0].Good -lt 2 -or -not $backup[0].PSObject.Properties['ForeignGood'] -or [int]$backup[0].ForeignGood -lt 2 -or
+                ($backup[0].PSObject.Properties['ForeignProbeBlocked'] -and $backup[0].ForeignProbeBlocked)) { $recoveryReady=$false }
+        }
+        if (-not $failoverReady -and -not $recoveryReady) {
+            $result.Reason='Waiting for three failed domestic current rounds and two good domestic backup rounds in every active protocol.'; return $result
         }
     } else { $targetGuid = if ($Mode -eq 'Wired') { $wired[0] } else { $wifi[0] } }
 
@@ -119,7 +127,8 @@ function Get-SwitchDecision {
         }
     }
     $result.Plan=$plan; $result.TargetGuid=$targetGuid
-    $result.Reason=if ($Mode -eq 'Auto') { 'Current path failed and the backup passed the required consecutive rounds.' } else { "Manual preference: $Mode." }
+    $result.Reason=if ($Mode -eq 'Auto' -and $recoveryReady -and -not $failoverReady) { 'Wired domestic and foreign access recovered; automatic return is enabled.' }
+        elseif ($Mode -eq 'Auto') { 'Current domestic path failed and the backup passed the required consecutive rounds.' } else { "Manual preference: $Mode." }
     return $result
 }
 

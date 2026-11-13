@@ -7,6 +7,7 @@ function Assert($Condition,[string]$Message) { if (-not $Condition) { throw $Mes
 Assert ([bool](Get-Command New-ControllerState -ErrorAction SilentlyContinue)) 'Controller must expose explicit monitor-only startup state'
 $state=New-ControllerState
 Assert ($state.Mode -eq 'Monitor') 'Startup must not enable automatic modification'
+Assert ($state.ContainsKey('ReturnToWired') -and -not $state.ReturnToWired) 'Wired recovery must remain explicitly off at first launch'
 Assert ($state.ContainsKey('Generation')) 'Controller must track generations to reject snapshots sampled before UI actions'
 $oldGeneration=$state.Generation
 Request-ConnectionCheck $state
@@ -20,6 +21,10 @@ Request-SwitchMode $state Auto $true
 Assert (-not $state.RestoreRequested -and $state.CheckRequested -and -not (Test-SnapshotCurrent $state $oldGeneration)) 'Auto enabled after restore must await a newly sampled generation'
 Assert (Test-SnapshotCurrent $state $state.Generation) 'Fresh generation must be consumable'
 $state=New-ControllerState
+$generation=$state.Generation
+Request-WiredRecovery $state $true
+Assert ($state.ReturnToWired -and $state.Mode -eq 'Monitor' -and $state.Generation -gt $generation) 'Changing recovery preference must invalidate stale samples without enabling control'
+Request-WiredRecovery $state $false
 $denied=$false
 try { Request-SwitchMode $state Auto $false } catch { $denied=$true }
 Assert ($denied -and $state.Mode -eq 'Monitor') 'Non-admin requests must not enable auto'
@@ -30,7 +35,8 @@ Assert ($state.Mode -eq 'WiFi') 'Manual request must replace automatic mode'
 $script:writes=0; $script:external=$false; $script:fail=$false
 function Test-ManagedMetrics { param($ExpectedPath,$BackupPath) return (-not $script:external) }
 function Get-SwitchDecision {
-    param($Links,$Mode,$ManagedGuids,$LastSwitch,$Now,$CooldownSeconds)
+    param($Links,$Mode,$ManagedGuids,$LastSwitch,$Now,$CooldownSeconds,[switch]$ReturnToWired)
+    $script:receivedRecovery=[bool]$ReturnToWired
     [pscustomobject]@{Plan=@([pscustomobject]@{Guid='wifi'});TargetGuid='wifi';Reason='Ready'}
 }
 function Set-SwitchPlan { param($Plan,$BackupPath,$ExpectedPath); if ($script:fail) { throw 'Write failed' }; $script:writes++; [pscustomobject]@{Success=$true;Changed=2} }
@@ -43,19 +49,30 @@ Assert ($state.LastSwitch -eq $now) 'Successful writes must establish cooldown'
 $null=Invoke-ControllerCycle $state $snapshot @() 'unused-baseline' 'unused-expected' $now.AddSeconds(1)
 Assert ($script:writes -eq 1) 'Monitor mode must never write metrics'
 Request-SwitchMode $state Auto $true
+$state.ReturnToWired=$true
+$script:external=$false; $script:fail=$false
+$null=Invoke-ControllerCycle $state $snapshot @() 'unused-baseline' 'unused-expected' $now.AddMinutes(5)
+Assert $script:receivedRecovery 'The controller must pass the opt-in preference to actual policy evaluation'
 $script:external=$true
 $d=Invoke-ControllerCycle $state $snapshot @() 'unused-baseline' 'unused-expected' $now
-Assert ($state.Mode -eq 'Monitor' -and $script:writes -eq 1 -and $d.Reason -match 'external') 'External changes must pause control without overwriting them'
+Assert ($state.Mode -eq 'Monitor' -and $script:writes -eq 2 -and $d.Reason -match 'external') 'External changes must pause control without overwriting them'
 $script:external=$false; $script:fail=$true
 Request-SwitchMode $state Wired $true
 $failed=$false
 try { $null=Invoke-ControllerCycle $state $snapshot @() 'unused-baseline' 'unused-expected' $now.AddMinutes(10) } catch { $failed=$true }
-Assert ($failed -and $state.Mode -eq 'Monitor' -and $state.LastSwitch -eq $now) 'Failed manual writes must not retry or mark a successful switch'
+Assert ($failed -and $state.Mode -eq 'Monitor' -and $state.LastSwitch -eq $now.AddMinutes(5)) 'Failed manual writes must not retry or mark a successful switch'
 $tmp=Join-Path ([IO.Path]::GetTempPath()) ('ef-config-'+[Guid]::NewGuid()+'.json')
 try {
     '{"adapterOverrides":{}}' | Set-Content $tmp -Encoding UTF8
     $c=Read-SwitchConfiguration $tmp
     Assert ($c.Https.Count -eq 2 -and $c.ManagedGuids.Count -eq 0) 'Legacy config must receive safe HTTPS defaults'
+    Assert ($c.DomesticHttps.Count -eq 2 -and $c.ForeignHttps.Count -eq 2 -and -not $c.ReturnToWired) 'Two independent profiles and opt-in wired recovery must have safe defaults'
+    '{"domesticHttpsEndpoints":["http://example.org/","https://example.net/"]}' | Set-Content $tmp -Encoding UTF8
+    $failed=$false; try { $null=Read-SwitchConfiguration $tmp } catch { $failed=$true }
+    Assert $failed 'Domestic endpoints must retain strict HTTPS configuration validation'
+    '{"autoReturnToWired":"false"}' | Set-Content $tmp -Encoding UTF8
+    $failed=$false; try { $null=Read-SwitchConfiguration $tmp } catch { $failed=$true }
+    Assert $failed 'A string preference must not accidentally enable automatic return'
     '{"httpsEndpoints":["http://example.org/","https://example.net/"]}' | Set-Content $tmp -Encoding UTF8
     $failed=$false; try { $null=Read-SwitchConfiguration $tmp } catch { $failed=$true }
     Assert $failed 'Config must reject insecure health endpoints'
@@ -65,5 +82,10 @@ try {
     '{"managedAdapterGuids":["11111111-1111-4111-8111-111111111111","22222222-2222-4222-8222-222222222222"]}' | Set-Content $tmp -Encoding UTF8
     $c=Read-SwitchConfiguration $tmp
     Assert ($c.ManagedGuids[0] -eq '{11111111-1111-4111-8111-111111111111}') 'Valid unbraced GUIDs must match Windows braced adapter identity'
+    Write-UserPreferences $tmp $c.ManagedGuids $true
+    $prefs=Read-UserPreferences $tmp (Read-SwitchConfiguration 'missing-config-fixture')
+    Assert ($prefs.ManagedGuids.Count -eq 2 -and $prefs.ReturnToWired) 'Adapter selection and wired recovery must survive a preference roundtrip'
+    $raw=Get-Content $tmp -Raw | ConvertFrom-Json
+    Assert (-not $raw.PSObject.Properties['mode'] -and -not $raw.PSObject.Properties['applying']) 'Saved preferences must never silently reactivate automatic control'
 } finally { Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue }
 Write-Output "PASS: $script:count controller assertions. No system settings changed."

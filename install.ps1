@@ -41,7 +41,7 @@ foreach ($folder in @($destination,$state)) {
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'EthernetFirst.ps1') -Destination $destination -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'src') -Destination $destination -Recurse -Force
 if (-not (Test-Path (Join-Path $destination 'config.json'))) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'config.json') -Destination $destination }
-$arguments='-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -StateDirectory "{1}"' -f (Join-Path $destination 'EthernetFirst.ps1'),$state
+$arguments='-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -TrayOnly -StateDirectory "{1}"' -f (Join-Path $destination 'EthernetFirst.ps1'),$state
 $action=New-ScheduledTaskAction -Execute $exe -Argument $arguments
 $trigger=New-ScheduledTaskTrigger -AtLogOn -User $user
 $principal=New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
