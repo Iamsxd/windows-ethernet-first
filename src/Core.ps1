@@ -137,7 +137,7 @@ function Get-NetworkSnapshot {
             foreach ($group in @('Domestic','Foreign')) {
                 $key=$baseKey+'/'+$group; $seen[$key]=$true; $probe=[int]$probes[$position]; $position++
                 $identity = "$sourceAddress|$profileName|$gateway|$($servers -join ',')|$($targets[$group] -join ',')"
-                if ($Health.ContainsKey($key) -and (-not $Health[$key].ContainsKey('Identity') -or $Health[$key].Identity -ne $identity)) { [void]$Health.Remove($key) }
+                if ($Health.ContainsKey($key) -and (-not $Health[$key].ContainsKey('Identity') -or $Health[$key].Identity -cne $identity)) { [void]$Health.Remove($key) }
                 if ($probe -eq -1) { [void]$Health.Remove($key); $healthy=$null }
                 else { $healthy = Update-Health $Health $key ($probe -eq 1); $Health[$key].Identity = $identity }
                 $good=0; $bad=0

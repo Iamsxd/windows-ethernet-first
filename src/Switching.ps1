@@ -5,15 +5,16 @@ function Get-SwitchDecision {
     param([object[]]$Links = @(), [ValidateSet('Monitor','Auto','Wired','WiFi')][string]$Mode = 'Monitor',
         [string[]]$ManagedGuids = @(), [datetime]$LastSwitch = [datetime]::MinValue,
         [datetime]$Now = [datetime]::UtcNow, [ValidateRange(0,86400)][int]$CooldownSeconds = 180,
-        [switch]$ReturnToWired)
+        [switch]$ReturnToWired, [object[]]$Adapters=@())
 
     $result = [pscustomobject]@{ Plan=@(); Reason=''; TargetGuid='' }
     if ($Mode -eq 'Monitor') { $result.Reason='Monitor mode; no settings changed.'; return $result }
     $physical = @($Links | Where-Object { $_.Kind -in @('Wired','WiFi') -and $_.Hardware -eq $true })
     $selected = @($ManagedGuids | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
     if (-not $selected.Count) {
-        $wired = @($physical | Where-Object Kind -eq 'Wired' | Select-Object -ExpandProperty Guid -Unique)
-        $wifi = @($physical | Where-Object Kind -eq 'WiFi' | Select-Object -ExpandProperty Guid -Unique)
+        $candidates=if ($Adapters.Count) {$Adapters} else {$physical}
+        $wired = @($candidates | Where-Object Kind -eq 'Wired' | Select-Object -ExpandProperty Guid -Unique)
+        $wifi = @($candidates | Where-Object Kind -eq 'WiFi' | Select-Object -ExpandProperty Guid -Unique)
         if ($wired.Count -ne 1 -or $wifi.Count -ne 1) {
             $result.Reason='Select exactly one physical wired adapter and one physical Wi-Fi adapter.'; return $result
         }

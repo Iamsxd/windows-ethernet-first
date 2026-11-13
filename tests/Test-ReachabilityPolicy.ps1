@@ -25,4 +25,8 @@ Assert (@((Get-SwitchDecision $unknown Auto -Now $now -ReturnToWired).Plan).Coun
 $dual=@($recovered + (Link wire Wired 20 2 0 1 0 IPv6) + (Link wifi WiFi 10 3 0 0 3 IPv6))
 Assert (@((Get-SwitchDecision $dual Auto -Now $now -ReturnToWired).Plan).Count -eq 0) 'Every active protocol must confirm both profiles before return'
 Assert (@((Get-SwitchDecision $recovered Monitor -Now $now -ReturnToWired).Plan).Count -eq 0) 'The preference must not activate control in Monitor mode'
+$inventory=@([pscustomobject]@{Guid='wire';Kind='Wired'},[pscustomobject]@{Guid='unplugged-wire';Kind='Wired'},[pscustomobject]@{Guid='wifi';Kind='WiFi'})
+Assert (@((Get-SwitchDecision $fallback Auto -Now $now -Adapters $inventory).Plan).Count -eq 0) 'Disconnected extra candidates must require the same explicit selection as the dashboard'
+Assert (@((Get-SwitchDecision $fallback Wired -Now $now -Adapters $inventory).Plan).Count -eq 0) 'Tray manual commands must use the same candidate rule'
+Assert (@((Get-SwitchDecision $fallback Auto -Now $now -Adapters $inventory -ManagedGuids @('wire','wifi')).Plan).Count -eq 2) 'An explicit saved pair may ignore disconnected unrelated candidates'
 Write-Output "PASS: $count dual-reachability policy assertions. No OS mutations."

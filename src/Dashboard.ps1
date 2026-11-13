@@ -1,7 +1,7 @@
 ﻿Set-StrictMode -Version Latest
 
 function New-NetworkDashboard {
-    param([System.Collections.Generic.Queue[string]]$Queue)
+    param([System.Collections.Generic.Queue[string]]$Queue,$WorkArea=$null)
     Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase
     $markup=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Dashboard.xaml'))
     $window=[Windows.Markup.XamlReader]::Parse($markup)
@@ -11,9 +11,25 @@ function New-NetworkDashboard {
         $control=$window.FindName($name)
         if ($control) { $controls[$name]=$control }
     }
-    $ui=@{Window=$window;Controls=$controls;AllowClose=$false;Updating=$false;SelectionDirty=$false;InventoryKey='';History=(New-Object 'System.Collections.ObjectModel.ObservableCollection[object]');LastNotice='';Queue=$Queue}
+    $ui=@{Window=$window;Controls=$controls;AllowClose=$false;Updating=$false;SelectionDirty=$false;InventoryKey='';History=(New-Object 'System.Collections.ObjectModel.ObservableCollection[object]');LastNotice='';LastRenderKey='';Queue=$Queue}
+    if ($null -eq $WorkArea) { $WorkArea=[Windows.SystemParameters]::WorkArea }
+    $width=[Math]::Max(1,$WorkArea.Width-24);$height=[Math]::Max(1,$WorkArea.Height-24)
+    $window.MinWidth=[Math]::Min(640,$width);$window.MinHeight=[Math]::Min(420,$height)
+    $window.Width=[Math]::Min(1140,$width);$window.Height=[Math]::Min(900,$height)
+    $window.WindowStartupLocation='Manual'
+    $window.Left=$WorkArea.Left+($WorkArea.Width-$window.Width)/2
+    $window.Top=$WorkArea.Top+($WorkArea.Height-$window.Height)/2
+    $window.Add_SizeChanged({
+        $compact=$ui.Window.ActualWidth -lt 980
+        [Windows.Controls.Grid]::SetColumnSpan($ui.Controls.WiredCard,$(if($compact){3}else{1}))
+        [Windows.Controls.Grid]::SetColumnSpan($ui.Controls.WifiCard,$(if($compact){3}else{1}))
+        [Windows.Controls.Grid]::SetColumn($ui.Controls.WifiCard,$(if($compact){0}else{2}))
+        [Windows.Controls.Grid]::SetRow($ui.Controls.WifiCard,$(if($compact){2}else{0}))
+        $ui.Controls.LinksGrid.RowDefinitions[1].Height=[Windows.GridLength]::new($(if($compact){18}else{0}))
+        $ui.Controls.SidebarColumn.Width=[Windows.GridLength]::new($(if($ui.Window.ActualWidth -lt 780){140}else{166}))
+    }.GetNewClosure())
     $controls.HistoryList.ItemsSource=$ui.History
-    foreach ($pair in @(@('CheckButton','Check'),@('WiredButton','Wired'),@('WifiButton','WiFi'),@('RestoreButton','Restore'),@('SaveAdaptersButton','SelectAdapters'))) {
+    foreach ($pair in @(@('CheckButton','Check'),@('WiredButton','Wired'),@('WifiButton','WiFi'),@('RestoreButton','Restore'),@('SaveAdaptersButton','SelectAdapters'),@('CancelAdaptersButton','CancelSelection'))) {
         $command=$pair[1]; $q=$Queue
         $controls[$pair[0]].Add_Click({$q.Enqueue($command)}.GetNewClosure())
     }
@@ -29,6 +45,13 @@ function New-NetworkDashboard {
         $controls[$pair[0]].Add_Click({$target.BringIntoView()}.GetNewClosure())
     }
     return $ui
+}
+
+function Test-DashboardRefreshNeeded {
+    param([hashtable]$UI,[string]$Key,[bool]$Force=$false)
+    if (-not $Force -and (-not $UI.Window.IsVisible -or $UI.LastRenderKey -ceq $Key)) { return $false }
+    $UI.LastRenderKey=$Key
+    return $true
 }
 
 function Get-DashboardSelection {
@@ -73,12 +96,12 @@ function Update-NetworkDashboard {
         }
         foreach ($kind in @('Wired','Wifi')) {
             $card=if ($kind -eq 'Wired') {$Model.Wired} else {$Model.WiFi}
-            $c[$kind+'Subtitle'].Text=if ($card.NeedsSelection) {'检测到多张网卡，请选择并保存。'} else {$card.Subtitle}
+            $c[$kind+'Subtitle'].Text=if ($UI.SelectionDirty) {'未保存 · 当前状态属于 '+$card.Name} elseif ($card.NeedsSelection) {'检测到多张网卡，请选择并保存。'} else {$card.Subtitle}
             $c[$kind+'Subtitle'].ToolTip=$card.Name+' · '+$card.Subtitle
             $c[$kind+'Badge'].Text=$card.Badge
             $c[$kind+'BadgeBorder'].Background=if ($card.IsCurrent) {'#E8F7F1'} else {'#F0F3F8'}
             $c[$kind+'Button'].Content=if ($card.IsCurrent) {'✓  正在使用'} elseif ($kind -eq 'Wired') {'优先使用有线'} else {'优先使用 Wi-Fi'}
-            $c[$kind+'Button'].IsEnabled=($IsAdmin -and $card.CanPrefer -and -not $State.RestoreRequested)
+            $c[$kind+'Button'].IsEnabled=($IsAdmin -and $card.CanPrefer -and -not $State.RestoreRequested -and -not $UI.SelectionDirty)
             if (-not $UI.SelectionDirty) {
                 $c[$kind+'Selector'].SelectedValue=if (@($Model.ManagedGuids).Count) {$card.Guid} else {''}
                 if ($c[$kind+'Selector'].SelectedIndex -lt 0) { $c[$kind+'Selector'].SelectedIndex=0 }
@@ -91,6 +114,7 @@ function Update-NetworkDashboard {
         }
         $c.RestoreButton.IsEnabled=($IsAdmin -and $HasBackup -and -not $State.RestoreRequested)
         $c.SaveAdaptersButton.IsEnabled=$IsAdmin
+        $c.CancelAdaptersButton.Visibility=if ($UI.SelectionDirty) {'Visible'} else {'Collapsed'}
         if (-not $UI.SelectionDirty) { $c.SelectionHint.Text=if ($IsAdmin) {'手动切换会关闭自动模式；每次启动也默认只检测。'} else {'当前没有管理员权限，仅可查看。请通过 start.bat 启动以切换线路。'} }
         $c.DiagnosticText.Text=([string]$State.LastReason)+$(if ($Model.ErrorMessage) {"`r`n"+$Model.ErrorMessage})
         $notice=$Model.NoticeCode+'|'+$Model.Notice

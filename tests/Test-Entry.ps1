@@ -1,4 +1,4 @@
-$ErrorActionPreference='Stop'
+﻿$ErrorActionPreference='Stop'
 $sourceEntry=Join-Path $PSScriptRoot '..\EthernetFirst.ps1'
 $script:writes=0
 function Get-NetAdapter { [pscustomobject]@{InterfaceGuid='virtual';ifIndex=55;Name='VPN';InterfaceDescription='VPN';HardwareInterface=$false;MediaType='IP';PhysicalMediaType='IP';Status='Up';LinkSpeed='1 Gbps'} }
@@ -29,6 +29,34 @@ try {
     try { & $entry -Once -Apply -Restore -NoNotifications -StateDirectory $tmp } catch { $failed=$true }
     if (-not $failed) { throw 'Conflicting mutation commands must be rejected' }
     $assertions=5
+    # Exercise real entry command/restore handlers with mock effects, without
+    # starting a controller or acquiring another production writer lock.
+    . (Join-Path $PSScriptRoot '..\src\Controller.ps1')
+    $tokens=$null;$parseErrors=$null
+    $ast=[Management.Automation.Language.Parser]::ParseFile($entry,[ref]$tokens,[ref]$parseErrors)
+    foreach ($name in @('Invoke-TrayRequests','Invoke-PendingRestore','Update-ControllerView')) {
+        $definition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)
+        . ([scriptblock]::Create($definition.Extent.Text))
+    }
+    $script:events=New-Object 'System.Collections.Generic.List[string]'
+    function Add-DashboardEvent { param($UI,$Message); $script:events.Add($Message) }
+    function Show-Notice { param($Message) }
+    function Test-ManagedMetrics { return $true }
+    function Restore-SwitchMetrics { $script:restored=$true }
+    $script:modelBuilds=0
+    function Get-DashboardModel { $script:modelBuilds++ }
+    $dashboard=@{Window=[pscustomobject]@{IsVisible=$false}}
+    Update-ControllerView
+    if ($script:modelBuilds -ne 0) { throw 'The real entry must skip model construction in a hidden tray session' };$assertions++
+    $state=New-ControllerState;$requests=New-Object 'System.Collections.Generic.Queue[string]'
+    $dashboard=@{SelectionDirty=$true};$tray=$null;$admin=$true;$zh=$true
+    $backupPath=Join-Path $tmp 'mock-backup';$expectedPath=Join-Path $tmp 'mock-expected'
+    $requests.Enqueue('Wired'); Invoke-TrayRequests
+    if ($state.Mode -ne 'Monitor' -or $state.Generation -ne 0 -or $script:events[0] -notmatch '未保存') { throw 'Dirty selection must block even a queued/tray manual action, with a visible explanation' };$assertions++
+    $requests.Enqueue('CancelSelection');Invoke-TrayRequests
+    if ($dashboard.SelectionDirty) { throw 'Cancel must restore the effective selection without changing metrics' };$assertions++
+    $script:restored=$false;Invoke-PendingRestore
+    if (-not $script:restored -or $script:events[$script:events.Count-1] -notmatch '恢复已完成') { throw 'Real restore handler must publish its completed outcome after the effect succeeds' };$assertions++
     $admin=([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if ($admin) {
         # An empty isolated recovery state causes no OS changes. Probe/config

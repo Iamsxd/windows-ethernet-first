@@ -45,4 +45,5 @@ Files: src/Dashboard.xaml, src/Dashboard.ps1, src/DashboardModel.ps1, EthernetFi
 - [x] RED: model states, selected route, settings/command queue and UI control actions.
 - [x] Build the visible dashboard and tray reopening, connect controls to the existing generation-aware queue.
 - [x] Verify actual window visually and exercise safe controls without changing real metrics.
-- [ ] Run full PS5.1/7 suite, inspect changes independently, publish to fork and package portable source.
+- [x] Run full PS5.1/7 suite and inspect changes independently.
+- [ ] Publish to fork and package portable source.

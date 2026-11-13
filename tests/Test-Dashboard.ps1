@@ -41,6 +41,9 @@ try {
     $ui.Controls.WiredSelector.ApplyTemplate() | Out-Null
     $label=$ui.Controls.WiredSelector.Template.FindName('SelectionLabel',$ui.Controls.WiredSelector)
     Assert ($null -ne $label -and $label.Text -eq 'Ethernet') 'Adapter picker must display the friendly name, never the PowerShell object representation'
+    $model.Wired.CanPrefer=$true;$model.WiFi.CanPrefer=$true;$model.Wired.Name='Ethernet'
+    Update-NetworkDashboard $ui $model $state $false $true $false
+    Assert (-not $ui.Controls.WiredButton.IsEnabled -and -not $ui.Controls.WifiButton.IsEnabled -and $ui.Controls.WiredSubtitle.Text -match '未保存.*Ethernet') 'Unsaved choices must name the effective adapter and prevent an ambiguous manual action'
     $failed=$false;try { Get-DashboardSelection $ui } catch {$failed=$true}
     Assert $failed 'One-sided adapter selection must be rejected'
     Assert ($queue.Count -eq 0) 'Programmatic toggle updates and selection edits must not change network state'
@@ -48,9 +51,21 @@ try {
     Assert (-not $ui.Window.IsVisible) 'Closing the dashboard must hide it without disposing the controller view'
     $ui.Window.Show()
     Assert $ui.Window.IsVisible 'The hidden dashboard must reopen from the tray'
+    Assert (Test-DashboardRefreshNeeded $ui 'frame-1') 'A changed visible frame must render'
+    Assert (-not (Test-DashboardRefreshNeeded $ui 'frame-1')) 'An unchanged frame must not repeat expensive model rendering'
     $ui.Window.Width=940;$ui.Window.Height=680;$ui.Window.UpdateLayout()
     Assert ($ui.Controls.MainScroll.ScrollableHeight -gt 0) 'Small windows must scroll instead of clipping settings'
     $ui.Window.Hide()
+    Assert (-not (Test-DashboardRefreshNeeded $ui 'frame-2')) 'Hidden tray sessions must skip dashboard rendering'
+    $small=New-NetworkDashboard $queue ([pscustomobject]@{Width=800;Height=500;Left=0;Top=0})
+    try {
+        Assert ($small.Window.Width -le 800 -and $small.Window.Height -le 500 -and $small.Window.MinWidth -le 800 -and $small.Window.MinHeight -le 500) 'The complete window must fit the scaled desktop work area'
+        $small.Window.Show();$small.Window.UpdateLayout()
+        Assert ([Windows.Controls.Grid]::GetRow($small.Controls.WifiCard) -eq 2) 'Narrow windows must stack the two cards without overlapping headers'
+        $small.Controls.RestoreButton.BringIntoView();$small.Window.UpdateLayout()
+        $point=$small.Controls.RestoreButton.TranslatePoint([Windows.Point]::new(0,0),$small.Controls.MainScroll)
+        Assert ($point.Y -ge 0 -and $point.Y -lt $small.Controls.MainScroll.ViewportHeight) 'Settings actions must be reachable by scrolling at 800 by 500'
+    } finally {$small.AllowClose=$true;$small.Window.Close()}
     if ($SnapshotPath) {
         $ui.AllowClose=$true;$ui.Window.Close()
         $ui=New-NetworkDashboard $queue

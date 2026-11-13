@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 
 function ConvertTo-HttpsEndpoints {
     param($Value,[string]$Name)
@@ -133,7 +133,8 @@ function Invoke-ControllerCycle {
             $State.Mode = 'Monitor'; $State.LastReason = 'Paused: external metric changes detected. Restore or restart after reviewing the settings.'
             return [pscustomobject]@{Plan=@();Reason=$State.LastReason;TargetGuid=''}
         }
-        $decision = Get-SwitchDecision -Links $Snapshot.Links -Mode $mode -ManagedGuids $ManagedGuids -LastSwitch $State.LastSwitch -Now $Now -CooldownSeconds 180 -ReturnToWired:$State.ReturnToWired
+        $adapters=if ($Snapshot.PSObject.Properties['Adapters']) {@($Snapshot.Adapters)} else {@()}
+        $decision = Get-SwitchDecision -Links $Snapshot.Links -Mode $mode -ManagedGuids $ManagedGuids -LastSwitch $State.LastSwitch -Now $Now -CooldownSeconds 180 -ReturnToWired:$State.ReturnToWired -Adapters $adapters
         if (@($decision.Plan).Count) {
             Set-SwitchPlan -Plan $decision.Plan -BackupPath $BackupPath -ExpectedPath $ExpectedPath | Out-Null
             $State.LastSwitch = $Now
@@ -144,4 +145,17 @@ function Invoke-ControllerCycle {
         $State.Mode = 'Monitor'; $State.LastReason = $_.Exception.Message
         throw
     }
+}
+
+function Get-ControllerEvent {
+    param($Decision,[string]$RequestedMode)
+    if (@($Decision.Plan).Count) {
+        $target=@($Decision.Plan | Where-Object Guid -eq $Decision.TargetGuid | Select-Object -First 1)
+        $kind=if ($target.Count -and $target[0].PSObject.Properties['Kind']) {[string]$target[0].Kind} else {''}
+        $name=switch ($kind) { Wired {'有线网络'} WiFi {'Wi-Fi 网络'} default {'所选线路'} }
+        if ($RequestedMode -eq 'Auto') { return '自动切换已完成：当前默认出口为'+$name+'。' }
+        return '手动切换已完成：已优先使用'+$name+'。'
+    }
+    if ($RequestedMode -in @('Wired','WiFi')) { return '手动切换未执行：请确认网卡选择、线路连接和默认出口，详情见诊断信息。' }
+    return ''
 }

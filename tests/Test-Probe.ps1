@@ -252,4 +252,13 @@ $profiles=[EthernetFirst.Probe]::CheckProfiles($loopback.InterfaceIndex,'127.0.0
 Assert ($profiles.Length -eq 2 -and $profiles[0] -eq 0 -and $profiles[1] -eq -1) 'One profile failing must not overwrite the other profile unknown result'
 $profiles=[EthernetFirst.Probe]::CheckProfiles(2000001,'127.0.0.1',[string[]]@(),[string[]]@('https://127.0.0.1/'),[string[]]@('https://127.0.0.1/'),100)
 Assert ($profiles[0] -eq -1 -and $profiles[1] -eq -1) 'Local interface failure must remain unknown in both profiles'
+$domesticPeer=[HangingTlsFixture]::new();$foreignPeer=[HangingTlsFixture]::new()
+try {
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    $profiles=[EthernetFirst.Probe]::CheckProfiles($loopback.InterfaceIndex,'127.0.0.1',[string[]]@(),[string[]]@("https://127.0.0.1:$($domesticPeer.Port)/"),[string[]]@("https://127.0.0.1:$($foreignPeer.Port)/"),600)
+    $watch.Stop()
+    Assert ($domesticPeer.Accepted -and $foreignPeer.Accepted -and $profiles[0] -eq 0 -and $profiles[1] -eq 0) 'Both actual profile TLS peers must be exercised independently'
+    Assert ($watch.ElapsedMilliseconds -lt 1050) 'Two hanging profiles must share a concurrent deadline, rather than two serial 600 ms waits'
+    Assert ($domesticPeer.WaitForClose() -and $foreignPeer.WaitForClose()) 'Both profile connections must be disposed after their deadline'
+} finally {$domesticPeer.Dispose();$foreignPeer.Dispose()}
 Write-Output "PASS $script:count probe tests (DNS, HTTP, strict TLS, bounded time; no adapter changes)"

@@ -47,10 +47,15 @@ function Show-LinkStatus {
     }
 }
 
-function Update-ControllerView([bool]$Busy=$false) {
+function Update-ControllerView([bool]$Busy=$false,[bool]$Force=$false) {
     if ($dashboard) {
+        if (-not $Force -and -not $dashboard.Window.IsVisible) { return }
+        $stamp=if ($lastSnapshot) {$lastSnapshot.CheckedAt} else {'pending'}
+        $hasBackup=Test-Path -LiteralPath $backupPath
+        $key=@($stamp,$state.Generation,$state.Mode,$state.ReturnToWired,$state.LastReason,$lastError,$Busy,$hasBackup,$dashboard.SelectionDirty) -join '|'
+        if (-not (Test-DashboardRefreshNeeded $dashboard $key $Force)) { return }
         $model=Get-DashboardModel $lastSnapshot $state $settings.ManagedGuids $lastError
-        Update-NetworkDashboard $dashboard $model $state $Busy $admin (Test-Path -LiteralPath $backupPath)
+        Update-NetworkDashboard $dashboard $model $state $Busy $admin $hasBackup
     }
 }
 
@@ -62,6 +67,7 @@ function Invoke-TrayRequests {
         $request = $requests.Dequeue()
         $actionError=''
         try {
+            if ($dashboard -and $dashboard.SelectionDirty -and ($request -in @('Wired','WiFi','AutoOn') -or ($request -eq 'AutoToggle' -and $state.Mode -ne 'Auto'))) { throw '请先保存或撤销未保存的网卡选择，再切换线路或开启自动模式。' }
             switch ($request) {
                 'Exit' { $state.Exit=$true; $state.Mode='Monitor' }
                 'Details' { Show-LinkStatus }
@@ -95,6 +101,7 @@ function Invoke-TrayRequests {
                     Request-ConnectionCheck $state
                     $script:nextCheck=[DateTime]::MinValue
                 }
+                'CancelSelection' { $dashboard.SelectionDirty=$false }
                 'Restore' {
                     Request-MetricRestore $state
                     $script:nextCheck=[DateTime]::MinValue
@@ -128,12 +135,16 @@ function Invoke-PendingRestore {
     if (-not (Test-ManagedMetrics -ExpectedPath $expectedPath -BackupPath $backupPath)) {
         $question=if ($zh) {'网卡设置已被修改，或上次操作未完成。仍要覆盖当前优先级并恢复工具首次保存的设置吗？'} else {'Metrics changed or an earlier operation is incomplete. Overwrite current priorities with the original saved settings?'}
         $answer=[Windows.Forms.MessageBox]::Show($question,'Ethernet First','YesNo','Warning','Button2')
-        if ($answer -ne [Windows.Forms.DialogResult]::Yes) { return }
+        if ($answer -ne [Windows.Forms.DialogResult]::Yes) {
+            if ($dashboard) { Add-DashboardEvent $dashboard '恢复已取消，保留当前优先级；自动模式保持关闭。' }
+            return
+        }
         $force=$true
     }
     Restore-SwitchMetrics -BackupPath $backupPath -ExpectedPath $expectedPath -Force:$force | Out-Null
     $state.LastReason=if ($zh) {'已恢复原设置；自动切换已关闭。'} else {'Original settings restored; automatic failover is off.'}
     Show-Notice $state.LastReason
+    if ($dashboard) { Add-DashboardEvent $dashboard '恢复已完成：原网卡优先级已还原，自动模式已关闭。' }
 }
 
 try {
@@ -158,7 +169,7 @@ try {
         . (Join-Path $PSScriptRoot 'src\DashboardModel.ps1')
         . (Join-Path $PSScriptRoot 'src\Dashboard.ps1')
         $dashboard=New-NetworkDashboard $requests
-        Update-ControllerView $true
+        Update-ControllerView $true $true
         if (-not $TrayOnly) { $dashboard.Window.Show() }
         $tray = New-Object Windows.Forms.NotifyIcon
         $tray.Icon=[Drawing.SystemIcons]::Information
@@ -188,7 +199,7 @@ try {
         if ($state.Exit) { break }
         if ($state.RestoreRequested) {
             try { Invoke-PendingRestore }
-            catch { $lastError=$_.Exception.Message; Show-Notice $lastError }
+            catch { $lastError=$_.Exception.Message; Show-Notice $lastError; if ($dashboard) { Add-DashboardEvent $dashboard ('恢复未完成：'+$lastError) } }
             finally {
                 Complete-MetricRestore $state; $health.Clear(); $nextCheck=[DateTime]::MinValue
                 if ($tray) { $autoItem.Checked=$false }
@@ -196,6 +207,7 @@ try {
             continue
         }
         if ([DateTime]::UtcNow -lt $nextCheck) { Start-Sleep -Milliseconds 100; continue }
+        $requestedMode=''
         try {
             $sampleGeneration=$state.Generation; $state.CheckRequested=$false
             # One worker at a time. The UI continues pumping while DNS/TLS is pending;
@@ -225,7 +237,10 @@ try {
                 continue
             }
             $lastSnapshot=$snapshot
+            $requestedMode=$state.Mode
             $decision=Invoke-ControllerCycle $state $snapshot $settings.ManagedGuids $backupPath $expectedPath
+            $outcome=Get-ControllerEvent $decision $requestedMode
+            if ($dashboard -and $outcome) { Add-DashboardEvent $dashboard $outcome }
             $lastError=''
             # Read the live defaults after a successful transaction for the status display.
             foreach ($link in $snapshot.Links) {
@@ -255,6 +270,7 @@ try {
             if ($Once) { $status | ConvertTo-Json -Depth 8 }
         } catch {
             $state.Mode='Monitor'; $lastError=$_.Exception.Message
+            if ($dashboard -and $requestedMode -in @('Wired','WiFi','Auto')) { Add-DashboardEvent $dashboard ('切换未完成，自动模式已关闭：'+$lastError) }
             Write-AtomicJson (Join-Path $StateDirectory 'status.json') @{checkedAt=[DateTime]::UtcNow.ToString('o');mode='Monitor';error=$lastError}
             if ($Once) { throw }
             Show-Notice $lastError

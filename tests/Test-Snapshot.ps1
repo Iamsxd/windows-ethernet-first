@@ -12,7 +12,8 @@ function Get-NetAdapter {
     if ($script:wirePresent) { [pscustomobject]@{InterfaceGuid='wired';ifIndex=11;Name='Ethernet';InterfaceDescription='Ethernet';HardwareInterface=$true;MediaType='802.3';PhysicalMediaType='802.3';Status='Up';LinkSpeed='1 Gbps'} }
     [pscustomobject]@{InterfaceGuid='vpn';ifIndex=55;Name='VPN';InterfaceDescription='VPN';HardwareInterface=$false;MediaType='IP';PhysicalMediaType='IP';Status='Up';LinkSpeed='1 Gbps'}
 }
-function Get-NetConnectionProfile { }
+$script:profile='Cafe'
+function Get-NetConnectionProfile { [pscustomobject]@{InterfaceIndex=11;Name=$script:profile} }
 function Get-NetIPInterface {
     foreach ($i in @(11,55)) { [pscustomobject]@{InterfaceIndex=$i;AddressFamily='IPv4';InterfaceMetric=25;AutomaticMetric='Enabled'} }
 }
@@ -60,6 +61,15 @@ $script:osFailure=$true
 try { $null=Get-NetworkSnapshot $h } catch { }
 Assert ($h.Count -eq 0) 'A failed overall snapshot must invalidate all consecutive evidence'
 $script:osFailure=$false
+$script:probe=1; $h.Clear()
+$targets=@{Domestic=@('https://a.test/OK','https://b.test/OK');Foreign=@('https://c.test/OK','https://d.test/OK')}
+$null=Get-NetworkSnapshot $h @{} $targets
+$script:profile='cafe';$s=Get-NetworkSnapshot $h @{} $targets
+$row=@($s.Links | Where-Object Guid -eq 'wired')[0]
+Assert ($row.DomesticGood -eq 1 -and $row.ForeignGood -eq 1) 'A case-only SSID change must reset both profile streaks'
+$targets.Domestic[0]='https://a.test/ok';$s=Get-NetworkSnapshot $h @{} $targets
+$row=@($s.Links | Where-Object Guid -eq 'wired')[0]
+Assert ($row.DomesticGood -eq 1 -and $row.ForeignGood -eq 2) 'A case-only HTTP path change must reset only that profile'
 function Invoke-LinkProbe { return @(-1,-1) }
 $s=Get-NetworkSnapshot $h
 $wired=@($s.Links | Where-Object Guid -eq 'wired')[0]
