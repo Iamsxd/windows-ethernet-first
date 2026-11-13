@@ -1,89 +1,45 @@
-# Ethernet First — prefer Ethernet over iPhone USB tethering on Windows
+# Ethernet First — manual switching and optional HTTPS failover
 
-[Русская документация](README.md)
+[中文说明](README.zh-CN.md) · [Upstream](https://github.com/w1zardz/windows-ethernet-first)
 
-Windows may select **Apple Mobile Device Ethernet** when you plug in your
-iPhone, even with a working wired Internet connection. Ethernet First is an
-open-source Windows 10/11 PowerShell network monitor that prefers working
-wired Ethernet, retains Wi-Fi / phone fallback, and displays notifications.
+This MIT-licensed fork retains the upstream PowerShell/C# implementation for Windows 10/11. No Python, driver or external PowerShell module is needed.
 
-## Install
+## Start
 
-[Download and extract the ZIP](https://github.com/w1zardz/windows-ethernet-first/archive/refs/heads/main.zip), run **install.bat**, and accept the
-Windows administrator prompt. No Python or third-party PowerShell modules are
-required. The current administrator account gets an interactive scheduled task
-at sign-in, with a tray icon and checks every 15 seconds.
+Extract the complete repository and run **start.bat**. Accept Windows UAC authorization; the tray starts in **monitor-only mode**. This portable launcher uses Chinese labels. For English, run `EthernetFirst.ps1 -Language en` from an administrator PowerShell.
 
-Code lives in `C:\Program Files\EthernetFirst`; status, logs and original
-metrics live in `C:\ProgramData\EthernetFirst`. Installation folders are
-protected against standard-user writes because the task runs elevated.
+Right-click the tray to prefer Ethernet, prefer Wi-Fi, toggle automatic failover, check now, view status, restore original metrics, or exit. Manual selection disables auto. Exit leaves current metrics in place; use Restore first to undo them. Each new process starts with auto off unless explicitly passed `-Apply`.
 
-## How it works
+Optional **install.bat** installs a protected, elevated task at the current user's sign-in; it also starts monitor-only. Portable state lives in `%LOCALAPPDATA%\EthernetFirst`; installed state lives in `%PROGRAMDATA%\EthernetFirst`. Use the same state directory to restore. Exit any portable tray before installing or uninstalling. **uninstall.bat** stops the installed task and restores its original metrics.
 
-1. Classify hardware Ethernet, Wi-Fi, Apple USB tethering and RNDIS adapters.
-2. Probe several public TCP/443 endpoints with sockets bound to both the source
-   address and the outgoing interface. IPv4 and IPv6 are independent.
-3. Require two successful checks for health and three failed checks for failure.
-4. Prefer **working wired Ethernet → Wi-Fi → phone tethering**. Deprioritize
-   failed connections only when another connection is proven available.
-5. Save original metrics by adapter GUID before any change, for restoration.
+## Health and safety
 
-The script does not disable adapters, alter VPN configuration or edit individual
-routes. Physical default metrics remain below the priority of existing virtual
-defaults. More-specific routes, existing sockets and VPN endpoints may continue
-using another connection: changing metrics cannot guarantee all traffic moves.
-Observed mobile-adapter traffic triggers an additional warning. Adapter byte
-counts include local traffic and are not a cellular billing meter.
-Wi-Fi traffic with healthy Ethernet also triggers a warning, covering hotspots
-with arbitrary names. Notifications support English and Russian (`-Language`).
+- Probe Google and Cloudflare HTTPS 204 endpoints, binding both source and outgoing interface. DNS uses that interface's same-family servers. TLS validates trust and hostname. No HTTP proxy or system DNS fallback is used.
+- One healthy endpoint is sufficient. Automatic failover requires three failed current rounds and two successful alternate rounds in every active protocol. A 180-second cooldown prevents oscillation; no automatic failback.
+- Only one real wired adapter and one real Wi-Fi adapter are managed. Ambiguous selections, split IPv4/IPv6 defaults, unknown local policy failures, and controlling unmanaged/VPN defaults refuse unsafe changes. Missing same-family DNS is unknown.
+- Save the first baseline by GUID, resolve indexes again before writes, verify actual default-route winners and roll back partial failures. External metric changes pause control. Restore asks before overwriting external changes.
+- Keep both adapters connected. Do not change IP, gateway, DNS, system proxy, VPN or router configuration. Existing sockets, application-bound traffic and more-specific VPN routes may keep using another connection.
 
-A fast link speed is not proof of Internet availability. A TCP handshake is
-not a speed test or proof that DNS / every website works. No change is applied
-while all connectivity results are unknown or failed. Large custom route
-metrics are left alone. VPN throughput, MTU, DPI and server problems require
-separate diagnostics.
-Windows access-denied socket errors mean unknown connectivity, not an outage.
-VPN Kill Switch policies can block direct probes. Configure permitted public
-TCP/443 addresses using `probeIPv4` / `probeIPv6` arrays in `config.json` if needed.
+When wired and Wi-Fi share the same router/upstream, switching can bypass a broken local link but cannot fix that common upstream. A successful health endpoint does not guarantee every website works. Each round starts 15 seconds after the previous one finishes; no overlapping probe rounds.
 
-## Detecting Wi-Fi hotspots
+## Configuration and CLI
 
-Wi-Fi hardware alone does not reveal whether the access point is a phone.
-Names containing iPhone / iPad / Personal Hotspot are heuristic hints; unknown
-Wi-Fi is simply lower priority than working wired Ethernet. Use adapter GUID
-overrides in `config.json` for known hardware, then restart the task:
-
-```json
-{"adapterOverrides":{"{YOUR-ADAPTER-GUID}":"Mobile"}}
-```
-
-Find GUIDs with `Get-NetAdapter | Select Name,InterfaceDescription,InterfaceGuid`.
-Overrides apply to the whole adapter across all Wi-Fi networks. Do not classify
-a VPN as physical hardware.
-
-## Monitor only / restore
+`config.json` accepts `adapterOverrides`, `managedAdapterGuids` and exactly two `httpsEndpoints` on distinct hosts returning HTTP 204. The default empty GUID list requires exactly one wired and one Wi-Fi candidate. To select explicitly, get GUIDs with `Get-NetAdapter | Select Name,InterfaceGuid`, add the two GUIDs and restart. Overrides cannot turn virtual hardware into physical hardware. Legacy TCP `probeIPv4` / `probeIPv6` lists are no longer used for health.
 
 ```powershell
+# Read-only, JSON output
 powershell -NoProfile -ExecutionPolicy Bypass -File .\EthernetFirst.ps1 -Once
-powershell -NoProfile -ExecutionPolicy Bypass -File .\EthernetFirst.ps1
+
+# Administrator shell; close existing tray first
+powershell -NoProfile -ExecutionPolicy Bypass -File .\EthernetFirst.ps1 -Once -Prefer WiFi
+powershell -NoProfile -ExecutionPolicy Bypass -File .\EthernetFirst.ps1 -Apply
+powershell -NoProfile -ExecutionPolicy Bypass -File .\EthernetFirst.ps1 -Restore
 ```
 
-Standalone state defaults to `%LOCALAPPDATA%\EthernetFirst`. `-Apply` requires
-elevation. Stop the monitor before using `-Restore` with the same state directory.
-For an installed copy, **uninstall.bat** stops the task and restores original
-metrics. Disconnected adapters may need to be reconnected before restoration;
-unrestored entries are retained. Files and backups are kept after uninstall.
+`-ForceRestore` with `-Restore` explicitly permits overwriting external metric changes. Reconnect missing adapters and retry incomplete restoration; their backup remains. Never delete the backup to dismiss a recovery error.
 
-Notifications are state based and rate limited. Windows Do Not Disturb can
-hide them; `status.json` and `events.log` remain available.
+## Validation and privacy
 
-## Privacy and tests
+Run `tests/Run-All.ps1` under Windows PowerShell 5.1 and PowerShell 7. Deterministic policy/transaction/controller/snapshot/entry tests mock Windows network calls. Socket tests use temporary local DNS/TLS peers and do not change real adapters or certificate stores.
 
-Probes contact Cloudflare, Google and Yandex public IPs without sending application
-payloads. No analytics, uploaded logs or bandwidth downloads. Local state
-contains adapter names and GUIDs; keep it and VPN credentials out of Git.
-
-Run `tests/Test-Core.ps1` for deterministic policy tests and socket-probe
-compilation. GitHub Actions runs Windows PowerShell 5.1 and PowerShell 7.
-
-MIT license. See the Russian README for Microsoft networking references.
+Only fixed DNS/HTTPS health requests are sent. Logs and state remain local, contain adapter names/GUIDs, and should not be committed. Platform TLS chain validation may independently retrieve certificate metadata; target-host DNS and HTTPS connections remain interface-bound. No analytics or browsing history collection.

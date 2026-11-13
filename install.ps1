@@ -41,11 +41,11 @@ foreach ($folder in @($destination,$state)) {
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'EthernetFirst.ps1') -Destination $destination -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'src') -Destination $destination -Recurse -Force
 if (-not (Test-Path (Join-Path $destination 'config.json'))) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'config.json') -Destination $destination }
-$arguments='-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Apply -StateDirectory "{1}"' -f (Join-Path $destination 'EthernetFirst.ps1'),$state
+$arguments='-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -StateDirectory "{1}"' -f (Join-Path $destination 'EthernetFirst.ps1'),$state
 $action=New-ScheduledTaskAction -Execute $exe -Argument $arguments
 $trigger=New-ScheduledTaskTrigger -AtLogOn -User $user
 $principal=New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
 $settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Prefer working wired Ethernet over Wi-Fi and USB phone tethering; notify on fallback.' -Force | Out-Null
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Monitor HTTPS connectivity; manual network selection and optional automatic failover from the tray.' -Force | Out-Null
 Start-ScheduledTask -TaskName $taskName
 Write-Output 'Ethernet First installed. Status: C:\ProgramData\EthernetFirst\status.json'

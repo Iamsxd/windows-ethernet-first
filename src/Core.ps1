@@ -3,6 +3,8 @@
 function Get-AdapterKind {
     param($Adapter, [string]$Profile = '', [hashtable]$Overrides = @{})
     $identity = [string]$Adapter.InterfaceGuid
+    # Overrides classify physical hardware only; a VPN can never become managed.
+    if (-not $Adapter.HardwareInterface) { return 'Virtual' }
     if ($Overrides.ContainsKey($identity)) { return $Overrides[$identity] }
     $description = [string]$Adapter.InterfaceDescription
     if ($description -match 'Apple Mobile Device|Remote NDIS|\bRNDIS\b|USB.*Tether|\bWWAN\b|Mobile Broadband') { return 'Mobile' }
@@ -47,9 +49,19 @@ function Update-Health {
 
 function Write-AtomicJson {
     param([string]$Path, $Value)
+    $Path = [IO.Path]::GetFullPath($Path)
     $temp = $Path + '.tmp'
-    ConvertTo-Json -InputObject $Value -Depth 8 | Set-Content -LiteralPath $temp -Encoding UTF8
-    Move-Item -LiteralPath $temp -Destination $Path -Force
+    try {
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json -InputObject $Value -Depth 12))
+        $file = [IO.FileStream]::new($temp,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::Read,4096,[IO.FileOptions]::WriteThrough)
+        try { $file.Write($bytes,0,$bytes.Length); $file.Flush($true) } finally { $file.Dispose() }
+        # PowerShell's forced overwrite deletes first. Windows ReplaceFile can
+        # also expose intermediate name changes; use one same-volume rename.
+        if (-not ('EthernetFirst.Persistence' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'Persistence.cs') }
+        [EthernetFirst.Persistence]::Replace($temp,$Path)
+    } finally {
+        if ([IO.File]::Exists($temp)) { try { [IO.File]::Delete($temp) } catch { } }
+    }
 }
 
 function Read-JsonArray {
@@ -58,17 +70,25 @@ function Read-JsonArray {
     foreach ($entry in (Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json)) { $entry }
 }
 
+function Invoke-LinkProbe {
+    param([int]$Index, [string]$Source, [string[]]$DnsServers, [string[]]$Endpoints, [int]$TimeoutMs)
+    [EthernetFirst.Probe]::CheckHttps($Index, $Source, $DnsServers, $Endpoints, $TimeoutMs)
+}
+
 function Get-NetworkSnapshot {
     param([hashtable]$Health, [hashtable]$Overrides = @{}, [hashtable]$ProbeTargets = @{
-        IPv4 = @('1.1.1.1','8.8.8.8','77.88.55.80')
-        IPv6 = @('2606:4700:4700::1111','2001:4860:4860::8888')
+        Https = @('https://www.gstatic.com/generate_204','https://cp.cloudflare.com/generate_204')
     })
+    $seen = @{}; $completed = $false
+    try {
     $adapters = @(Get-NetAdapter -ErrorAction Stop | Where-Object Status -eq 'Up')
     $profiles = @(Get-NetConnectionProfile -ErrorAction SilentlyContinue)
     $ipInterfaces = @(Get-NetIPInterface -ErrorAction Stop)
     $addresses = @(Get-NetIPAddress -ErrorAction Stop | Where-Object AddressState -eq 'Preferred')
     $routes = @(Get-NetRoute -ErrorAction Stop | Where-Object DestinationPrefix -in @('0.0.0.0/0', '::/0'))
+    $dns = @(Get-DnsClientServerAddress -ErrorAction Stop)
     $links = @(); $virtualMetrics = @{ IPv4 = 0; IPv6 = 0 }; $physical = @()
+    $deadline = [DateTime]::UtcNow.AddSeconds(14)
     foreach ($adapter in $adapters) {
         $profile = @($profiles | Where-Object InterfaceIndex -eq $adapter.ifIndex | Select-Object -First 1)
         $profileName = if ($profile.Count) { [string]$profile[0].Name } else { '' }
@@ -78,22 +98,39 @@ function Get-NetworkSnapshot {
             $defaults = @($routes | Where-Object { $_.InterfaceIndex -eq $adapter.ifIndex -and [string]$_.AddressFamily -eq $family } | Sort-Object RouteMetric)
             if (-not $iface.Count -or -not $defaults.Count) { continue }
             $total = [int]$iface[0].InterfaceMetric + [int]$defaults[0].RouteMetric
-            if ($kind -eq 'Virtual') { $virtualMetrics[$family] = [Math]::Max($virtualMetrics[$family], $total); continue }
+            if ($kind -eq 'Virtual') { $virtualMetrics[$family] = [Math]::Max($virtualMetrics[$family], $total) }
             $source = @($addresses | Where-Object {
                 $_.InterfaceIndex -eq $adapter.ifIndex -and [string]$_.AddressFamily -eq $family -and
                 $_.IPAddress -notmatch '^(169\.254\.|fe80:|::1$)' -and -not $_.SkipAsSource
             } | Select-Object -First 1)
-            if (-not $source.Count) { continue }
-            $probe = [EthernetFirst.Probe]::Check([int]$adapter.ifIndex, [string]$source[0].IPAddress, $ProbeTargets[$family], 1200)
             $key = "$($adapter.InterfaceGuid)/$family"
-            if ($probe -eq -1) { $Health.Remove($key); $healthy=$null }
-            else { $healthy = Update-Health $Health $key ($probe -eq 1) }
+            $seen[$key] = $true
+            $probe = -1; $sourceAddress = ''; $servers = @()
+            if ($source.Count) { $sourceAddress = [string]$source[0].IPAddress }
+            $remaining = [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds
+            if ($kind -in @('Wired','WiFi') -and $source.Count -and $remaining -gt 0) {
+                $servers = @($dns | Where-Object InterfaceIndex -eq $adapter.ifIndex | ForEach-Object ServerAddresses | Where-Object {
+                    $parsed = $null
+                    [Net.IPAddress]::TryParse([string]$_, [ref]$parsed) -and
+                    (($family -eq 'IPv4') -eq ($parsed.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork))
+                } | Select-Object -Unique)
+                $probe = Invoke-LinkProbe -Index $adapter.ifIndex -Source $sourceAddress -DnsServers $servers -Endpoints $ProbeTargets.Https -TimeoutMs ([Math]::Min(3500,$remaining))
+            }
+            $gateway = if ($defaults[0].PSObject.Properties['NextHop']) { [string]$defaults[0].NextHop } else { '' }
+            $identity = "$sourceAddress|$profileName|$gateway|$($servers -join ',')"
+            if ($Health.ContainsKey($key) -and (-not $Health[$key].ContainsKey('Identity') -or $Health[$key].Identity -ne $identity)) { [void]$Health.Remove($key) }
+            if ($probe -eq -1) { [void]$Health.Remove($key); $healthy=$null }
+            else { $healthy = Update-Health $Health $key ($probe -eq 1); $Health[$key].Identity = $identity }
+            $good = 0; $bad = 0
+            if ($Health.ContainsKey($key)) { $good = $Health[$key].Good; $bad = $Health[$key].Bad }
             $links += [pscustomobject]@{
                 Guid = [string]$adapter.InterfaceGuid; Index = [int]$adapter.ifIndex
                 Name = [string]$adapter.Name; Kind = $kind; Family = $family
                 Healthy = $healthy; ProbeSuccess = ($probe -eq 1); ProbeBlocked = ($probe -eq -1); Metric = [int]$iface[0].InterfaceMetric
                 Automatic = [string]$iface[0].AutomaticMetric; RouteMetric = [int]$defaults[0].RouteMetric
                 TotalMetric = $total; LinkSpeed = [string]$adapter.LinkSpeed
+                Good = $good; Bad = $bad; Hardware = [bool]$adapter.HardwareInterface
+                Source = $sourceAddress; DnsServers = $servers
             }
         }
         if ($kind -ne 'Virtual') {
@@ -101,7 +138,12 @@ function Get-NetworkSnapshot {
             if ($stats) { $physical += [pscustomobject]@{ Guid=[string]$adapter.InterfaceGuid; Name=$adapter.Name; Kind=$kind; Bytes=([double]$stats.ReceivedBytes + [double]$stats.SentBytes) } }
         }
     }
+    $completed = $true
     [pscustomobject]@{ Links=$links; Traffic=$physical; VirtualMetrics=$virtualMetrics }
+    } finally {
+        if (-not $completed) { $Health.Clear() }
+        else { foreach ($key in @($Health.Keys)) { if (-not $seen.ContainsKey($key)) { [void]$Health.Remove($key) } } }
+    }
 }
 
 function Set-PriorityPlan {

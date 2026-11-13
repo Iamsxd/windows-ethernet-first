@@ -3,6 +3,12 @@
 *.reg
 status.json
 original-metrics.json
+original-metrics.json.lock
+managed-metrics.json
+managed-metrics.json.pending.json
+managed-metrics.json.restore-*.pending.json
+original-metrics.json.tmp
+managed-metrics.json*.tmp
 private-backups/
 .idea/
 .vscode/

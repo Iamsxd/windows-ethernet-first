@@ -1,3 +1,8 @@
 {
-  "adapterOverrides": {}
+  "adapterOverrides": {},
+  "managedAdapterGuids": [],
+  "httpsEndpoints": [
+    "https://www.gstatic.com/generate_204",
+    "https://cp.cloudflare.com/generate_204"
+  ]
 }
